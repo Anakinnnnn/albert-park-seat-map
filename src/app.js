@@ -15,6 +15,7 @@ const FLIGHT_MS = 350;
 const SECTION_PAD = 0.12;
 const CLOSE_ENOUGH = 0.6;
 const AUTO_CLOSE = 0.35;
+const MIN_SEAT_CLICK_PX = 2;
 const OPEN_GUARD_MS = 400;
 const PAN_STEP = 80;
 const PAN_KEYS = { ArrowLeft: [1, 0], ArrowRight: [-1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] };
@@ -99,6 +100,7 @@ const view = { k: 0, tx: 0, ty: 0 };
 let hoverSeat = -1;
 let hoverSection = -1;
 let paintMode = false;
+let coversOn = true;
 let dirty = true;
 let lastFrame = performance.now();
 
@@ -165,7 +167,7 @@ const zoomAt = (sx, sy, factor) => {
 };
 
 const intersects = (s, x0, y0, x1, y1) => s.b[2] >= x0 && s.b[0] <= x1 && s.b[3] >= y0 && s.b[1] <= y1;
-const showsSeats = (si) => activeSections.has(si) || view.k >= SHOW_ALL_SEATS_K;
+const showsSeats = (si) => !coversOn || activeSections.has(si) || view.k >= SHOW_ALL_SEATS_K;
 const seatsOpen = (si) => sections[si].cover < 0.5;
 
 const seatLook = (i, now) => {
@@ -552,7 +554,9 @@ const justOpened = () => performance.now() - openedAt < OPEN_GUARD_MS;
 
 const handleClick = (x, y) => {
     const si = sectionAt(x, y);
-    if (si >= 0 && !seatsOpen(si)) return openSection(si);
+    const seatsTooSmall = view.k * SEAT_SIZE * 2 < MIN_SEAT_CLICK_PX;
+    if (si >= 0 && (!seatsOpen(si) || seatsTooSmall)) return openSection(si);
+    if (seatsTooSmall) return;
     const i = seatAt(x, y);
     if (i >= 0 && !justOpened()) clickSeat(i);
 };
@@ -627,6 +631,7 @@ window.addEventListener("keydown", (e) => {
     if (digit >= 1 && digit <= COLOURS.length) setActive(digit - 1);
     if (key === "0" || key === "e") setActive(ERASER);
     if (key === "p") togglePaint();
+    if (key === "c") toggleCovers();
     if (key === "+" || key === "=") zoomAt(W / 2, H / 2, 1.6);
     if (key === "-") zoomAt(W / 2, H / 2, 1 / 1.6);
     if (key === "escape") {
@@ -800,7 +805,7 @@ const restore = (text) => {
 
 const save = () => {
     try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...JSON.parse(serialise()), active }));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...JSON.parse(serialise()), active, covers: coversOn }));
     } catch (err) {
         console.warn("Could not save seats", err);
     }
@@ -813,6 +818,7 @@ const load = () => {
         const data = JSON.parse(raw);
         restore(raw);
         if (typeof data.active === "number") active = data.active;
+        if (typeof data.covers === "boolean") coversOn = data.covers;
     } catch (err) {
         console.warn("Could not load saved seats", err);
     }
@@ -889,7 +895,17 @@ const showWholeCircuit = () => {
     fitBox(FIT_BOX, 0.02, true);
 };
 
+const syncCoversButton = () => $("covers-toggle").setAttribute("aria-pressed", String(coversOn));
+
+const toggleCovers = () => {
+    coversOn = !coversOn;
+    syncCoversButton();
+    dirty = true;
+    save();
+};
+
 $("paint-toggle").addEventListener("click", togglePaint);
+$("covers-toggle").addEventListener("click", toggleCovers);
 $("undo").addEventListener("click", undo);
 $("redo").addEventListener("click", redo);
 $("zoom-in").addEventListener("click", () => zoomAt(W / 2, H / 2, 1.6));
@@ -915,6 +931,7 @@ updateSectionFills();
 buildSwatches();
 renderPanel();
 updateHistoryButtons();
+syncCoversButton();
 resize();
 fitBox(FIT_BOX, 0.02);
 new ResizeObserver(() => {
