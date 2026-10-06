@@ -10,6 +10,9 @@ const SHOW_ALL_SEATS_K = 2.2;
 const MIN_K = 0.03;
 const MAX_K = 60;
 const DRAG_THRESHOLD = 4;
+const HISTORY_LIMIT = 200;
+const PAN_STEP = 80;
+const PAN_KEYS = { ArrowLeft: [1, 0], ArrowRight: [-1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] };
 const STORAGE_KEY = "apgp-seat-planner-v2";
 const SEAT_GREY = "#bfbfbf";
 const SECTION_GREY = "#949494";
@@ -343,11 +346,54 @@ const updateSectionFills = () => {
     });
 };
 
-const commit = () => {
+const undoStack = [];
+const redoStack = [];
+let baseline = colourOf.slice();
+
+const seatsWord = (count) => `${count} seat${count === 1 ? "" : "s"}`;
+
+const updateHistoryButtons = () => {
+    $("undo").disabled = undoStack.length === 0;
+    $("redo").disabled = redoStack.length === 0;
+};
+
+const applied = () => {
+    baseline = colourOf.slice();
     updateSectionFills();
     dirty = true;
     save();
     renderPanel();
+    updateHistoryButtons();
+};
+
+const commit = () => {
+    const changes = [];
+    for (let i = 0; i < n; i++) if (colourOf[i] !== baseline[i]) changes.push([i, baseline[i], colourOf[i]]);
+    if (changes.length) {
+        undoStack.push(changes);
+        if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
+        redoStack.length = 0;
+    }
+    applied();
+};
+
+const stepHistory = (from, to, forward) => {
+    const changes = from.pop();
+    if (!changes) return 0;
+    changes.forEach(([i, prev, next]) => setSeat(i, forward ? next : prev));
+    to.push(changes);
+    applied();
+    return changes.length;
+};
+
+const undo = () => {
+    const count = stepHistory(undoStack, redoStack, false);
+    flash(count ? `Undid ${seatsWord(count)}.` : "Nothing to undo.");
+};
+
+const redo = () => {
+    const count = stepHistory(redoStack, undoStack, true);
+    flash(count ? `Redid ${seatsWord(count)}.` : "Nothing to redo.");
 };
 
 const clickSeat = (i) => {
@@ -509,11 +555,36 @@ const updateHover = (x, y, type) => {
 
 window.addEventListener("keydown", (e) => {
     if (e.target.matches("input, textarea, select")) return;
+    const key = e.key.toLowerCase();
+    if (e.ctrlKey || e.metaKey) {
+        if (key === "z") {
+            e.preventDefault();
+            if (e.shiftKey) redo();
+            else undo();
+        } else if (key === "y") {
+            e.preventDefault();
+            redo();
+        }
+        return;
+    }
+    if (e.altKey) return;
     const digit = Number(e.key);
     if (digit >= 1 && digit <= COLOURS.length) setActive(digit - 1);
-    if (e.key === "0" || e.key === "e") setActive(ERASER);
-    if (e.key === "+" || e.key === "=") zoomAt(W / 2, H / 2, 1.6);
-    if (e.key === "-") zoomAt(W / 2, H / 2, 1 / 1.6);
+    if (key === "0" || key === "e") setActive(ERASER);
+    if (key === "p") togglePaint();
+    if (key === "+" || key === "=") zoomAt(W / 2, H / 2, 1.6);
+    if (key === "-") zoomAt(W / 2, H / 2, 1 / 1.6);
+    if (key === "escape") {
+        if (paintMode) togglePaint();
+        else showWholeCircuit();
+    }
+    const pan = PAN_KEYS[e.key];
+    if (pan) {
+        e.preventDefault();
+        view.tx += pan[0] * PAN_STEP;
+        view.ty += pan[1] * PAN_STEP;
+        dirty = true;
+    }
 });
 
 const labelFor = (c) => labels[c].trim() || COLOURS[c].name;
@@ -751,17 +822,23 @@ $("clear-all").addEventListener("click", (e) => {
     flash("All seats cleared.");
 });
 
-$("paint-toggle").addEventListener("click", (e) => {
+const togglePaint = () => {
     paintMode = !paintMode;
-    e.currentTarget.setAttribute("aria-pressed", String(paintMode));
+    $("paint-toggle").setAttribute("aria-pressed", String(paintMode));
     mapEl.classList.toggle("paint", paintMode);
-});
-$("zoom-in").addEventListener("click", () => zoomAt(W / 2, H / 2, 1.6));
-$("zoom-out").addEventListener("click", () => zoomAt(W / 2, H / 2, 1 / 1.6));
-$("zoom-fit").addEventListener("click", () => {
+};
+
+const showWholeCircuit = () => {
     activeSections.clear();
     fitBox(FIT_BOX, 0.02);
-});
+};
+
+$("paint-toggle").addEventListener("click", togglePaint);
+$("undo").addEventListener("click", undo);
+$("redo").addEventListener("click", redo);
+$("zoom-in").addEventListener("click", () => zoomAt(W / 2, H / 2, 1.6));
+$("zoom-out").addEventListener("click", () => zoomAt(W / 2, H / 2, 1 / 1.6));
+$("zoom-fit").addEventListener("click", showWholeCircuit);
 
 const jump = $("jump");
 sections.forEach((s, si) => {
@@ -777,9 +854,11 @@ jump.addEventListener("change", () => {
 
 $("total-seats").textContent = n.toLocaleString("en-AU");
 load();
+baseline = colourOf.slice();
 updateSectionFills();
 buildSwatches();
 renderPanel();
+updateHistoryButtons();
 resize();
 fitBox(FIT_BOX, 0.02);
 new ResizeObserver(() => {

@@ -49,6 +49,7 @@ select, button, input, textarea { font: inherit; color: inherit; }
 select, .btn { height: 34px; border: 1px solid var(--line); background: var(--bg); border-radius: 6px; padding: 0 10px; }
 .btn { cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-weight: 600; font-size: 14px; }
 .btn:hover { border-color: var(--muted); }
+.btn:disabled { opacity: 0.4; cursor: default; border-color: var(--line); }
 .btn[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .btn.icon { width: 34px; justify-content: center; padding: 0; font-size: 18px; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -82,6 +83,9 @@ details summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 textarea { width: 100%; box-sizing: border-box; min-height: 90px; margin-top: 8px; font-family: var(--font-mono); font-size: 11.5px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; resize: vertical; }
 .status { font-size: 13px; color: var(--muted); min-height: 1em; margin: 6px 0 0; }
 .foot { color: var(--muted); font-size: 12.5px; line-height: 1.45; margin-top: auto; }
+.keys { display: grid; grid-template-columns: auto 1fr; gap: 7px 14px; margin: 0; font-size: 13.5px; align-items: baseline; }
+.keys dt { white-space: nowrap; }
+.keys dd { margin: 0; color: var(--muted); min-width: 0; }
 kbd { font-family: var(--font-mono); font-size: 11.5px; border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; }
 @media (max-width: 760px) {
     main { grid-template-columns: 1fr; grid-template-rows: 1fr minmax(0, 42%); }
@@ -101,7 +105,9 @@ kbd { font-family: var(--font-mono); font-size: 11.5px; border: 1px solid var(--
         <div class="controls">
             <label for="jump" hidden>Grandstand</label>
             <select id="jump" aria-label="Jump to grandstand"><option value="">Jump to grandstand…</option></select>
-            <button class="btn" id="paint-toggle" aria-pressed="false" title="Drag to colour seats (or hold Shift)">Paint</button>
+            <button class="btn icon" id="undo" aria-label="Undo" title="Undo (Ctrl+Z)" disabled>↶</button>
+            <button class="btn icon" id="redo" aria-label="Redo" title="Redo (Ctrl+Y)" disabled>↷</button>
+            <button class="btn" id="paint-toggle" aria-pressed="false" title="Drag to colour seats (P, or hold Shift)">Paint</button>
             <button class="btn icon" id="zoom-in" aria-label="Zoom in">+</button>
             <button class="btn icon" id="zoom-out" aria-label="Zoom out">−</button>
             <button class="btn" id="zoom-fit">Whole circuit</button>
@@ -140,9 +146,23 @@ kbd { font-family: var(--font-mono); font-size: 11.5px; border: 1px solid var(--
                     </div>
                 </details>
             </section>
+            <section>
+                <h2>Shortcuts</h2>
+                <dl class="keys">
+                    <dt><kbd>Ctrl</kbd> <kbd>Z</kbd></dt><dd>Undo</dd>
+                    <dt><kbd>Ctrl</kbd> <kbd>Y</kbd></dt><dd>Redo (or <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>Z</kbd>)</dd>
+                    <dt><kbd>1</kbd>–<kbd>8</kbd></dt><dd>Pick a colour</dd>
+                    <dt><kbd>0</kbd> or <kbd>E</kbd></dt><dd>Eraser</dd>
+                    <dt><kbd>P</kbd></dt><dd>Paint mode on or off</dd>
+                    <dt><kbd>Shift</kbd> drag</dt><dd>Paint while dragging</dd>
+                    <dt>Double-click</dt><dd>Colour the whole row</dd>
+                    <dt><kbd>+</kbd> <kbd>−</kbd></dt><dd>Zoom in and out</dd>
+                    <dt>Arrow keys</dt><dd>Move around the map</dd>
+                    <dt><kbd>Esc</kbd></dt><dd>Leave paint mode, or show the whole circuit</dd>
+                </dl>
+            </section>
             <p class="foot">
-                Click a grandstand to open it, then click a seat to colour it and click again to clear. Double-click colours the whole row. <kbd>Shift</kbd>-drag or Paint mode colours as you drag.
-                Grey seats are uncoloured. Colours are your own notes and say nothing about availability. They're saved in this browser only.
+                Click a grandstand to open it, then click a seat to colour it and click again to clear. Grey seats are uncoloured. Colours are your own notes and say nothing about availability. They're saved in this browser only.
             </p>
         </aside>
     </main>
@@ -160,6 +180,9 @@ const SHOW_ALL_SEATS_K = 2.2;
 const MIN_K = 0.03;
 const MAX_K = 60;
 const DRAG_THRESHOLD = 4;
+const HISTORY_LIMIT = 200;
+const PAN_STEP = 80;
+const PAN_KEYS = { ArrowLeft: [1, 0], ArrowRight: [-1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] };
 const STORAGE_KEY = "apgp-seat-planner-v2";
 const SEAT_GREY = "#bfbfbf";
 const SECTION_GREY = "#949494";
@@ -493,11 +516,54 @@ const updateSectionFills = () => {
     });
 };
 
-const commit = () => {
+const undoStack = [];
+const redoStack = [];
+let baseline = colourOf.slice();
+
+const seatsWord = (count) => `${count} seat${count === 1 ? "" : "s"}`;
+
+const updateHistoryButtons = () => {
+    $("undo").disabled = undoStack.length === 0;
+    $("redo").disabled = redoStack.length === 0;
+};
+
+const applied = () => {
+    baseline = colourOf.slice();
     updateSectionFills();
     dirty = true;
     save();
     renderPanel();
+    updateHistoryButtons();
+};
+
+const commit = () => {
+    const changes = [];
+    for (let i = 0; i < n; i++) if (colourOf[i] !== baseline[i]) changes.push([i, baseline[i], colourOf[i]]);
+    if (changes.length) {
+        undoStack.push(changes);
+        if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
+        redoStack.length = 0;
+    }
+    applied();
+};
+
+const stepHistory = (from, to, forward) => {
+    const changes = from.pop();
+    if (!changes) return 0;
+    changes.forEach(([i, prev, next]) => setSeat(i, forward ? next : prev));
+    to.push(changes);
+    applied();
+    return changes.length;
+};
+
+const undo = () => {
+    const count = stepHistory(undoStack, redoStack, false);
+    flash(count ? `Undid ${seatsWord(count)}.` : "Nothing to undo.");
+};
+
+const redo = () => {
+    const count = stepHistory(redoStack, undoStack, true);
+    flash(count ? `Redid ${seatsWord(count)}.` : "Nothing to redo.");
 };
 
 const clickSeat = (i) => {
@@ -659,11 +725,36 @@ const updateHover = (x, y, type) => {
 
 window.addEventListener("keydown", (e) => {
     if (e.target.matches("input, textarea, select")) return;
+    const key = e.key.toLowerCase();
+    if (e.ctrlKey || e.metaKey) {
+        if (key === "z") {
+            e.preventDefault();
+            if (e.shiftKey) redo();
+            else undo();
+        } else if (key === "y") {
+            e.preventDefault();
+            redo();
+        }
+        return;
+    }
+    if (e.altKey) return;
     const digit = Number(e.key);
     if (digit >= 1 && digit <= COLOURS.length) setActive(digit - 1);
-    if (e.key === "0" || e.key === "e") setActive(ERASER);
-    if (e.key === "+" || e.key === "=") zoomAt(W / 2, H / 2, 1.6);
-    if (e.key === "-") zoomAt(W / 2, H / 2, 1 / 1.6);
+    if (key === "0" || key === "e") setActive(ERASER);
+    if (key === "p") togglePaint();
+    if (key === "+" || key === "=") zoomAt(W / 2, H / 2, 1.6);
+    if (key === "-") zoomAt(W / 2, H / 2, 1 / 1.6);
+    if (key === "escape") {
+        if (paintMode) togglePaint();
+        else showWholeCircuit();
+    }
+    const pan = PAN_KEYS[e.key];
+    if (pan) {
+        e.preventDefault();
+        view.tx += pan[0] * PAN_STEP;
+        view.ty += pan[1] * PAN_STEP;
+        dirty = true;
+    }
 });
 
 const labelFor = (c) => labels[c].trim() || COLOURS[c].name;
@@ -901,17 +992,23 @@ $("clear-all").addEventListener("click", (e) => {
     flash("All seats cleared.");
 });
 
-$("paint-toggle").addEventListener("click", (e) => {
+const togglePaint = () => {
     paintMode = !paintMode;
-    e.currentTarget.setAttribute("aria-pressed", String(paintMode));
+    $("paint-toggle").setAttribute("aria-pressed", String(paintMode));
     mapEl.classList.toggle("paint", paintMode);
-});
-$("zoom-in").addEventListener("click", () => zoomAt(W / 2, H / 2, 1.6));
-$("zoom-out").addEventListener("click", () => zoomAt(W / 2, H / 2, 1 / 1.6));
-$("zoom-fit").addEventListener("click", () => {
+};
+
+const showWholeCircuit = () => {
     activeSections.clear();
     fitBox(FIT_BOX, 0.02);
-});
+};
+
+$("paint-toggle").addEventListener("click", togglePaint);
+$("undo").addEventListener("click", undo);
+$("redo").addEventListener("click", redo);
+$("zoom-in").addEventListener("click", () => zoomAt(W / 2, H / 2, 1.6));
+$("zoom-out").addEventListener("click", () => zoomAt(W / 2, H / 2, 1 / 1.6));
+$("zoom-fit").addEventListener("click", showWholeCircuit);
 
 const jump = $("jump");
 sections.forEach((s, si) => {
@@ -927,9 +1024,11 @@ jump.addEventListener("change", () => {
 
 $("total-seats").textContent = n.toLocaleString("en-AU");
 load();
+baseline = colourOf.slice();
 updateSectionFills();
 buildSwatches();
 renderPanel();
+updateHistoryButtons();
 resize();
 fitBox(FIT_BOX, 0.02);
 new ResizeObserver(() => {
