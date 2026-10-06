@@ -181,6 +181,10 @@ const MIN_K = 0.03;
 const MAX_K = 60;
 const DRAG_THRESHOLD = 4;
 const HISTORY_LIMIT = 200;
+const FLIGHT_MS = 350;
+const SECTION_PAD = 0.12;
+const CLOSE_ENOUGH = 0.6;
+const OPEN_GUARD_MS = 400;
 const PAN_STEP = 80;
 const PAN_KEYS = { ArrowLeft: [1, 0], ArrowRight: [-1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] };
 const STORAGE_KEY = "apgp-seat-planner-v2";
@@ -279,18 +283,48 @@ const resize = () => {
     dirty = true;
 };
 
-const fitBox = (b, pad = 0.08) => {
-    if (!W || !H) return;
-    const bw = b[2] - b[0];
-    const bh = b[3] - b[1];
-    const k = Math.min(MAX_K, Math.min(W / (bw * (1 + pad * 2)), H / (bh * (1 + pad * 2))));
+let flight = null;
+let openedAt = -Infinity;
+
+const stopFlight = () => {
+    flight = null;
+};
+
+const fitScale = (b, pad) => Math.min(MAX_K, Math.min(W / ((b[2] - b[0]) * (1 + pad * 2)), H / ((b[3] - b[1]) * (1 + pad * 2))));
+
+const setCamera = (cx, cy, k) => {
     view.k = k;
-    view.tx = W / 2 - ((b[0] + b[2]) / 2) * k;
-    view.ty = H / 2 - ((b[1] + b[3]) / 2) * k;
+    view.tx = W / 2 - cx * k;
+    view.ty = H / 2 - cy * k;
     dirty = true;
 };
 
+// Interpolate the centre linearly and the scale in log space so zooming feels even.
+const stepFlight = (now) => {
+    if (!flight) return;
+    const t = Math.min(1, (now - flight.t0) / FLIGHT_MS);
+    const ease = 1 - (1 - t) ** 3;
+    const k = Math.exp(Math.log(flight.from.k) + (Math.log(flight.to.k) - Math.log(flight.from.k)) * ease);
+    setCamera(flight.from.cx + (flight.to.cx - flight.from.cx) * ease, flight.from.cy + (flight.to.cy - flight.from.cy) * ease, k);
+    if (t >= 1) flight = null;
+};
+
+const fitBox = (b, pad = 0.08, animate = false) => {
+    if (!W || !H) return;
+    const k = fitScale(b, pad);
+    const cx = (b[0] + b[2]) / 2;
+    const cy = (b[1] + b[3]) / 2;
+    if (!animate || reducedMotion.matches || !(view.k > 0)) {
+        stopFlight();
+        setCamera(cx, cy, k);
+        return;
+    }
+    const [fromX, fromY] = toMap(W / 2, H / 2);
+    flight = { t0: performance.now(), from: { cx: fromX, cy: fromY, k: view.k }, to: { cx, cy, k } };
+};
+
 const zoomAt = (sx, sy, factor) => {
+    stopFlight();
     const k = Math.max(MIN_K, Math.min(MAX_K, view.k * factor));
     const [mx, my] = toMap(sx, sy);
     view.k = k;
@@ -441,7 +475,8 @@ const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 const loop = (now) => {
     const dt = reducedMotion.matches ? TRANSITION_MS : now - lastFrame;
     lastFrame = now;
-    const moving = stepCovers(dt);
+    stepFlight(now);
+    const moving = stepCovers(dt) || flight !== null;
     if (reducedMotion.matches) seatAnims.clear();
     if (dirty || moving || seatAnims.size) {
         dirty = false;
@@ -579,9 +614,14 @@ const fillRow = (i) => {
     commit();
 };
 
-const openSection = (si) => {
+const openSection = (si, alwaysMove = false) => {
     activeSections.add(si);
-    fitBox(sections[si].b, 0.12);
+    openedAt = performance.now();
+    const s = sections[si];
+    const [x0, y0] = toMap(0, 0);
+    const [x1, y1] = toMap(W, H);
+    const alreadyClose = view.k >= fitScale(s.b, SECTION_PAD) * CLOSE_ENOUGH && intersects(s, x0, y0, x1, y1);
+    if (alwaysMove || !alreadyClose) fitBox(s.b, SECTION_PAD, true);
 };
 
 const describe = (i) => `${sections[SEC[i]].name} · Row ${rows[ROW[i]].name} · Seat ${NUM[i]}`;
@@ -601,9 +641,11 @@ mapEl.addEventListener("pointerdown", (e) => {
     pointers.set(e.pointerId, { x, y });
     if (pointers.size === 2) {
         const [a, b] = [...pointers.values()];
+        stopFlight();
         gesture = { type: "pinch", dist: Math.hypot(a.x - b.x, a.y - b.y), k: view.k, cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2, tx: view.tx, ty: view.ty };
         return;
     }
+    stopFlight();
     gesture = { type: paintMode || e.shiftKey ? "paint" : "pan", sx: x, sy: y, tx: view.tx, ty: view.ty, moved: false };
     lastPaint = -1;
 });
@@ -666,15 +708,17 @@ const endPointer = (e) => {
 mapEl.addEventListener("pointerup", endPointer);
 mapEl.addEventListener("pointercancel", endPointer);
 
+const justOpened = () => performance.now() - openedAt < OPEN_GUARD_MS;
+
 const handleClick = (x, y) => {
-    const i = seatAt(x, y);
-    if (i >= 0) return clickSeat(i);
     const si = sectionAt(x, y);
     if (si >= 0 && !seatsOpen(si)) return openSection(si);
-    if (si < 0) zoomAt(x, y, 2.2);
+    const i = seatAt(x, y);
+    if (i >= 0 && !justOpened()) clickSeat(i);
 };
 
 mapEl.addEventListener("dblclick", (e) => {
+    if (justOpened()) return;
     const [x, y] = localPoint(e);
     const i = seatAt(x, y);
     if (i >= 0) fillRow(i);
@@ -682,6 +726,7 @@ mapEl.addEventListener("dblclick", (e) => {
 
 mapEl.addEventListener("wheel", (e) => {
     e.preventDefault();
+    stopFlight();
     const [x, y] = localPoint(e);
     const delta = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
     zoomAt(x, y, Math.exp(-delta * 0.0015));
@@ -751,6 +796,7 @@ window.addEventListener("keydown", (e) => {
     const pan = PAN_KEYS[e.key];
     if (pan) {
         e.preventDefault();
+        stopFlight();
         view.tx += pan[0] * PAN_STEP;
         view.ty += pan[1] * PAN_STEP;
         dirty = true;
@@ -881,7 +927,7 @@ const renderPanel = () => {
             const cx = (b[0] + b[2]) / 2;
             const cy = (b[1] + b[3]) / 2;
             activeSections.add(row.sec);
-            fitBox([cx - 30, cy - 22, cx + 30, cy + 22], 0);
+            fitBox([cx - 30, cy - 22, cx + 30, cy + 22], 0, true);
         });
         wrap.appendChild(btn);
     });
@@ -1000,7 +1046,7 @@ const togglePaint = () => {
 
 const showWholeCircuit = () => {
     activeSections.clear();
-    fitBox(FIT_BOX, 0.02);
+    fitBox(FIT_BOX, 0.02, true);
 };
 
 $("paint-toggle").addEventListener("click", togglePaint);
@@ -1018,7 +1064,7 @@ sections.forEach((s, si) => {
     jump.appendChild(o);
 });
 jump.addEventListener("change", () => {
-    if (jump.value !== "") openSection(Number(jump.value));
+    if (jump.value !== "") openSection(Number(jump.value), true);
     jump.value = "";
 });
 
