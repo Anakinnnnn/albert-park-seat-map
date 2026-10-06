@@ -14,6 +14,7 @@ const HISTORY_LIMIT = 200;
 const FLIGHT_MS = 350;
 const SECTION_PAD = 0.12;
 const CLOSE_ENOUGH = 0.6;
+const AUTO_CLOSE = 0.35;
 const OPEN_GUARD_MS = 400;
 const PAN_STEP = 80;
 const PAN_KEYS = { ArrowLeft: [1, 0], ArrowRight: [-1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] };
@@ -288,7 +289,16 @@ const draw = (now) => {
     $("hint").hidden = view.k >= SHOW_ALL_SEATS_K || activeSections.size > 0 || colourCount() > 0;
 };
 
+// Close stands once they're small on screen again; skipped mid-flight because a fly-in starts zoomed out.
+const closeDistantSections = () => {
+    if (flight) return;
+    activeSections.forEach((si) => {
+        if (view.k < fitScale(sections[si].b, SECTION_PAD) * AUTO_CLOSE) activeSections.delete(si);
+    });
+};
+
 const stepCovers = (dt) => {
+    closeDistantSections();
     let moving = false;
     const step = dt / TRANSITION_MS;
     sections.forEach((s, si) => {
