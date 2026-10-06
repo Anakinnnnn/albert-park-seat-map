@@ -176,6 +176,7 @@ const FIT_BOX = [204, 1236, 10036, 6444];
 const SEAT_SIZE = 1;
 const UNAVAILABLE_SCALE = 0.85;
 const SECTION_STROKE = 8;
+const SECTION_STROKE_PX = 2;
 const VEIL_OPACITY = 0.15;
 const TRANSITION_MS = 500;
 const SHOW_ALL_SEATS_K = 2.2;
@@ -437,7 +438,7 @@ const draw = (now) => {
         ctx.fillStyle = mix(WHITE, solidFill, s.cover);
         ctx.fill(s.path);
         ctx.strokeStyle = WHITE;
-        ctx.lineWidth = SECTION_STROKE;
+        ctx.lineWidth = Math.min(SECTION_STROKE, SECTION_STROKE_PX / k);
         ctx.stroke(s.path);
     });
     ctx.globalAlpha = 1;
