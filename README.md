@@ -6,6 +6,8 @@ Seats are drawn the same way as Ticketmaster's interactive seat map: same seat s
 
 ## Using it
 
+https://anakinnnnn.github.io/albert-park-seat-map/
+
 Open `index.html` in a browser. It's a single self-contained file with no dependencies.
 
 - Click a grandstand (or pick one from **Jump to grandstand**) to open it.
